@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>缓冲区越界写：栈帧可视化交互演示（教育用途）</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__title">
+        <div class="h1">缓冲区越界写：栈帧可视化交互演示</div>
+        <div class="subtitle">
+          教育用途：展示“越界写如何覆盖相邻内存/控制数据”，不包含可利用攻击步骤
+        </div>
+      </div>
+      <div class="topbar__badge">Linux / x86_64（概念模型）</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <h2>控制面板</h2>
+
+        <div class="card">
+          <div class="row">
+            <label class="label" for="pattern">写入内容（模式）</label>
+            <select id="pattern">
+              <option value="A">全 A（0x41）</option>
+              <option value="ABCD">ABCD 循环（0x41 0x42 0x43 0x44…）</option>
+              <option value="random">伪随机字节</option>
+              <option value="custom">自定义 ASCII</option>
+            </select>
+          </div>
+
+          <div class="row" id="customRow" hidden>
+            <label class="label" for="customText">自定义 ASCII</label>
+            <input id="customText" type="text" value="HELLO_OVERFLOW" />
+          </div>
+
+          <div class="row">
+            <label class="label" for="writeLen">
+              写入长度（字节）
+              <span class="muted" id="writeLenHint"></span>
+            </label>
+            <input id="writeLen" type="range" min="0" max="64" value="24" />
+          </div>
+
+          <div class="row">
+            <button id="btnReset" class="btn">重置栈帧</button>
+            <button id="btnStep" class="btn btn--primary">单步写 1 字节</button>
+            <button id="btnRun" class="btn">一次写完</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>防护开关（用于理解效果）</h3>
+          <div class="row row--tight">
+            <label class="check">
+              <input id="mitCanary" type="checkbox" checked />
+              <span>Stack Canary（返回前校验）</span>
+            </label>
+          </div>
+          <div class="row row--tight">
+            <label class="check">
+              <input id="mitNX" type="checkbox" checked />
+              <span>NX（栈不可执行）</span>
+            </label>
+          </div>
+          <div class="row row--tight">
+            <label class="check">
+              <input id="mitASLR" type="checkbox" checked />
+              <span>ASLR（地址随机化）</span>
+            </label>
+          </div>
+          <div class="note">
+            这些开关只影响“模拟结论”，不是在你的机器上真正开启/关闭系统防护。
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>当前状态</h3>
+          <div class="status" id="status"></div>
+        </div>
+
+        <div class="card">
+          <h3>怎么读这个图</h3>
+          <ul class="bullets">
+            <li><b>栈向低地址增长</b>：图中上方更“高地址”，下方更“低地址”。</li>
+            <li><b>写入从 buf[0] 开始</b>：超过缓冲区长度后会覆盖到后面的字段。</li>
+            <li><b>红色高亮</b>：本轮写入覆盖过的字节。</li>
+            <li><b>返回（ret）</b>：如果“返回地址”被改写，控制流会变得不可预测（模拟里用“崩溃/异常跳转”表示）。</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>新手讲解（点开看）</h3>
+
+          <details class="details" open>
+            <summary>这页面到底在干啥？（一句话）</summary>
+            <div class="details__body">
+              这是一个<strong>动画版“内存沙盘”</strong>：用一排字节格子模拟栈帧里相邻内存的排布，让你看到
+              “从 <code>buf[0]</code> 连续写入，写多了就会覆盖到后面的字段”。
+            </div>
+          </details>
+
+          <details class="details">
+            <summary>抽屉比喻：buf / canary / RBP / return address</summary>
+            <div class="details__body">
+              想象一个抽屉里从左到右放了 4 个盒子（中间没隔板）：
+              <ul class="bullets">
+                <li><b>buf（16 字节）</b>：装数据的盒子。</li>
+                <li><b>canary（8 字节）</b>：防伪贴纸——用来发现你把东西写穿了（启用 Canary 时会在返回前检查）。</li>
+                <li><b>saved RBP（8 字节）</b>：函数内部“定位自己栈帧”的信息（概念化）。</li>
+                <li><b>return address（8 字节）</b>：函数结束后要回到哪里继续执行的“回程地址”（概念化）。</li>
+              </ul>
+            </div>
+          </details>
+
+          <details class="details">
+            <summary>“单步写 1 字节”在做什么？</summary>
+            <div class="details__body">
+              每点一次，就写入 1 个字节：先写 <code>buf[0]</code>，再写 <code>buf[1]</code>……当写到第 17 个字节（offset=16）时，
+              就会开始覆盖 <b>canary</b>，继续写会覆盖到 <b>saved RBP</b>、再到 <b>return address</b>。
+            </div>
+          </details>
+
+          <details class="details">
+            <summary>30 秒看懂：照着做一遍</summary>
+            <div class="details__body">
+              <ol class="steps">
+                <li>把“写入长度”调到 <b>10</b>，点“一次写完” → 只写在 <b>buf</b>，不越界。</li>
+                <li>把“写入长度”调到 <b>20</b>，点“一次写完” → 开始覆盖 <b>canary</b>；如果勾选了 Canary，会在 <b>check</b> 阶段阻断。</li>
+                <li>把“写入长度”调到 <b>36</b>，点“一次写完” → 覆盖到 <b>return address</b>，返回时结论会变成“不可预测/可能崩溃（模拟）”。</li>
+              </ol>
+            </div>
+          </details>
+
+          <div class="callout">
+            <div class="callout__title">你只需要带走的唯一重点</div>
+            <div class="callout__body">
+              <b>写入长度 &gt; 缓冲区容量</b> → 写操作会继续覆盖后面的相邻内存 → 相邻数据（甚至控制数据）被破坏。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="viz">
+        <div class="viz__header">
+          <h2>栈帧（Frame）可视化</h2>
+          <div class="muted">
+            结构：buf(16) → canary(8) → saved RBP(8) → return address(8)
+          </div>
+        </div>
+
+        <div class="legend">
+          <div class="pill pill--buf">buf</div>
+          <div class="pill pill--canary">canary</div>
+          <div class="pill pill--rbp">saved RBP</div>
+          <div class="pill pill--ret">return addr</div>
+          <div class="pill pill--written">本轮写入</div>
+        </div>
+
+        <div class="vizGrid">
+          <div class="vizMain">
+            <div class="mem" id="mem"></div>
+
+            <div class="footerNote">
+              提示：你可以把“写入长度”拉到 32+，观察覆盖到 <b>返回地址</b> 后模拟会如何判定“返回时出问题”。
+            </div>
+          </div>
+
+          <aside class="vizAside">
+            <div class="card card--aside">
+              <h3>讲解字幕（会跟着你的操作变化）</h3>
+              <div class="status" id="narration"></div>
+              <div class="note">提示：多点几次“单步写 1 字节”，字幕会告诉你“刚刚写到了哪里”。</div>
+              <div class="log" id="narrationLog"></div>
+            </div>
+
+            <div class="card card--aside">
+              <h3>写入指针（offset）</h3>
+              <div class="status" id="inspectorPointer"></div>
+            </div>
+
+            <div class="card card--aside">
+              <h3>将覆盖到哪个字段</h3>
+              <div class="status" id="inspectorField"></div>
+            </div>
+
+            <div class="card card--aside">
+              <h3>抽象时间线（call → write → check → ret）</h3>
+              <div class="timeline" id="inspectorTimeline"></div>
+              <div class="note">
+                说明：这是“函数调用返回过程”的抽象，不代表真实指令序列；用于帮助理解为何 Canary 校验通常发生在 ret 之前。
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
+
